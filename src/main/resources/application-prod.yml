@@ -1,0 +1,229 @@
+spring:
+  application:
+    name: quickserve-delivery-platform
+
+  # PostgreSQL Configuration for Production
+  datasource:
+    url: jdbc:postgresql://quickserve-db-cluster:5432/quickserve_db
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+    driver-class-name: org.postgresql.Driver
+    hikari:
+      # Connection Pool Settings for High Scale
+      minimum-idle: 10
+      maximum-pool-size: 50
+      connection-timeout: 5000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+      pool-name: QuickServeHikariCP
+      auto-commit: false
+      leak-detection-threshold: 60000
+
+  # JPA Configuration
+  jpa:
+    database-platform: org.hibernate.dialect.PostgreSQLDialect
+    hibernate:
+      ddl-auto: validate  # Use Flyway/Liquibase for migrations in production
+    show-sql: false
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          batch_size: 50
+          fetch_size: 100
+        order_inserts: true
+        order_updates: true
+        query:
+          in_clause_parameter_padding: true
+        connection:
+          provider_disables_autocommit: true
+
+  # Redis Configuration (L2 Cache)
+  data:
+    redis:
+      host: ${REDIS_HOST:quickserve-redis-cluster}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD}
+      lettuce:
+        pool:
+          max-active: 20
+          max-idle: 10
+          min-idle: 5
+          max-wait: 2000
+      timeout: 3000ms
+      cluster:
+        nodes: ${REDIS_CLUSTER_NODES}
+        max-redirects: 3
+
+  # Cache Configuration
+  cache:
+    type: redis
+    redis:
+      time-to-live: 300000  # 5 minutes default
+      cache-null-values: false
+      use-key-prefix: true
+    caffeine:
+      spec: maximumSize=10000,expireAfterWrite=60s
+
+  # Kafka Configuration
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:kafka-1:9092,kafka-2:9092,kafka-3:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      acks: 1  # Balance between performance and reliability
+      retries: 3
+      compression-type: snappy
+      batch-size: 32768
+      buffer-memory: 33554432
+      linger-ms: 10
+    consumer:
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+      group-id: quickserve-consumer-group
+      auto-offset-reset: earliest
+      enable-auto-commit: false
+      max-poll-records: 500
+      fetch-min-size: 1
+      fetch-max-wait: 500
+    listener:
+      concurrency: 3
+      ack-mode: batch
+
+server:
+  port: 8080
+  # Tomcat Threading Configuration for High Throughput
+  tomcat:
+    threads:
+      max: 400  # Max concurrent requests per instance
+      min-spare: 50
+    max-connections: 10000
+    accept-count: 200
+    connection-timeout: 5000
+  # Enable compression
+  compression:
+    enabled: true
+    mime-types: application/json,application/xml,text/html,text/xml,text/plain
+    min-response-size: 1024
+  # HTTP/2 Support
+  http2:
+    enabled: true
+
+# Application Configuration
+quickserve:
+  delivery:
+    base-delivery-fee: 2.99
+    per-km-charge: 0.50
+    max-delivery-radius-km: 15
+  payment:
+    processing-fee-percent: 2.5
+  notification:
+    enabled: true
+  cache:
+    ttl:
+      user-profile: 3600  # 1 hour
+      restaurant-list: 300  # 5 minutes
+      restaurant-details: 300
+      menu-items: 300
+      active-orders: 1800  # 30 minutes
+      delivery-location: 10  # 10 seconds
+
+# Resilience4j Configuration
+resilience4j:
+  # Circuit Breaker
+  circuitbreaker:
+    instances:
+      restaurantService:
+        failure-rate-threshold: 50
+        slow-call-rate-threshold: 50
+        slow-call-duration-threshold: 2s
+        wait-duration-in-open-state: 5s
+        permitted-number-of-calls-in-half-open-state: 10
+        sliding-window-size: 100
+        sliding-window-type: COUNT_BASED
+        minimum-number-of-calls: 20
+        automatic-transition-from-open-to-half-open-enabled: true
+      orderService:
+        failure-rate-threshold: 50
+        wait-duration-in-open-state: 5s
+        sliding-window-size: 100
+      paymentService:
+        failure-rate-threshold: 30
+        wait-duration-in-open-state: 10s
+        sliding-window-size: 50
+
+  # Rate Limiter
+  ratelimiter:
+    instances:
+      default:
+        limit-for-period: 1000
+        limit-refresh-period: 1s
+        timeout-duration: 0
+      orderCreation:
+        limit-for-period: 50
+        limit-refresh-period: 1s
+        timeout-duration: 0
+
+  # Retry
+  retry:
+    instances:
+      default:
+        max-attempts: 3
+        wait-duration: 100ms
+        enable-exponential-backoff: true
+        exponential-backoff-multiplier: 2
+
+  # Bulkhead (Thread Pool Isolation)
+  bulkhead:
+    instances:
+      default:
+        max-concurrent-calls: 100
+      paymentService:
+        max-concurrent-calls: 50
+
+# Actuator Configuration (Monitoring)
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus,httptrace
+      base-path: /actuator
+  endpoint:
+    health:
+      show-details: always
+      probes:
+        enabled: true  # Kubernetes probes
+  metrics:
+    export:
+      prometheus:
+        enabled: true
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+    tags:
+      application: ${spring.application.name}
+      environment: production
+  tracing:
+    sampling:
+      probability: 0.1  # Sample 10% of traces in production
+  health:
+    livenessstate:
+      enabled: true
+    readinessstate:
+      enabled: true
+
+# Logging Configuration
+logging:
+  level:
+    root: INFO
+    com.quickserve: INFO
+    org.springframework.web: WARN
+    org.hibernate: WARN
+    org.springframework.kafka: INFO
+  pattern:
+    console: "%d{yyyy-MM-dd HH:mm:ss} - %msg%n"
+    file: "%d{yyyy-MM-dd HH:mm:ss} [%thread] %-5level %logger{36} - %msg%n"
+  file:
+    name: /var/log/quickserve/application.log
+    max-size: 100MB
+    max-history: 30
